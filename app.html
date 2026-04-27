@@ -1,711 +1,521 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
-<meta name="theme-color" content="#1B6B3A"/>
-<meta name="mobile-web-app-capable" content="yes"/>
-<meta name="apple-mobile-web-app-capable" content="yes"/>
-<meta name="apple-mobile-web-app-status-bar-style" content="default"/>
-<meta name="apple-mobile-web-app-title" content="SuperComparador"/>
-<title>SuperComparador Paraguay</title>
-<style>
-  :root {
-    --verde: #1B6B3A;
-    --verde-oscuro: #145230;
-    --verde-claro: #e8f5ee;
-    --rojo: #c0392b;
-    --rojo-claro: #fdecea;
-    --gris: #f4f4f4;
-    --gris-borde: #e0e0e0;
-    --texto: #1a1a1a;
-    --texto-sec: #666;
-    --blanco: #ffffff;
-    --sombra: 0 2px 12px rgba(0,0,0,0.10);
-    --radio: 12px;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f0f0; color: var(--texto); min-height: 100vh; }
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+import requests
+from bs4 import BeautifulSoup
+import re
+import time
+import logging
+import os
+import json
+from urllib.parse import urlparse, urljoin
 
-  /* HEADER */
-  .header { background: var(--verde); color: #fff; padding: 14px 16px 12px; display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 100; box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
-  .header-icon { width: 34px; height: 34px; background: rgba(255,255,255,0.2); border-radius: 8px; display: flex; align-items: center; justify-content: center; }
-  .header-icon svg { width: 20px; height: 20px; }
-  .header-title { font-size: 17px; font-weight: 600; }
-  .header-sub { font-size: 11px; opacity: 0.8; }
-  .header-settings { margin-left: auto; background: rgba(255,255,255,0.15); border: none; border-radius: 8px; padding: 6px 10px; color: #fff; font-size: 13px; cursor: pointer; }
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-  /* TABS */
-  .tabs { display: flex; background: #fff; border-bottom: 1px solid var(--gris-borde); position: sticky; top: 62px; z-index: 99; }
-  .tab { flex: 1; padding: 11px 4px; font-size: 12px; text-align: center; border: none; background: none; color: var(--texto-sec); cursor: pointer; border-bottom: 2.5px solid transparent; font-weight: 500; transition: all 0.2s; }
-  .tab.active { color: var(--verde); border-bottom-color: var(--verde); }
+app = Flask(__name__)
+CORS(app)
 
-  /* CONTENIDO */
-  .content { padding: 14px; }
-  .section { display: none; }
-  .section.active { display: block; }
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+]
+_ua_idx = 0
 
-  /* CARDS */
-  .card { background: var(--blanco); border-radius: var(--radio); padding: 14px; margin-bottom: 12px; box-shadow: var(--sombra); }
-  .card-title { font-size: 13px; font-weight: 600; color: var(--texto-sec); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; }
-
-  /* INPUTS */
-  .input-group { margin-bottom: 10px; }
-  .input-label { font-size: 12px; color: var(--texto-sec); margin-bottom: 4px; }
-  input[type=text], input[type=url], input[type=number] {
-    width: 100%; padding: 11px 14px; border: 1.5px solid var(--gris-borde); border-radius: 10px;
-    font-size: 15px; color: var(--texto); background: #fff; outline: none; transition: border 0.2s;
-  }
-  input:focus { border-color: var(--verde); }
-  input::placeholder { color: #aaa; }
-
-  /* BOTONES */
-  .btn { display: block; width: 100%; padding: 13px; border: none; border-radius: 10px; font-size: 15px; font-weight: 600; cursor: pointer; transition: opacity 0.2s, transform 0.1s; text-align: center; }
-  .btn:active { transform: scale(0.98); opacity: 0.9; }
-  .btn-primary { background: var(--verde); color: #fff; }
-  .btn-secondary { background: var(--gris); color: var(--texto); }
-  .btn-danger { background: var(--rojo-claro); color: var(--rojo); }
-  .btn-sm { display: inline-block; width: auto; padding: 6px 12px; font-size: 12px; border-radius: 8px; }
-  .btn-row { display: flex; gap: 8px; margin-top: 10px; }
-  .btn-row .btn { flex: 1; }
-
-  /* SEARCH BAR */
-  .search-bar { display: flex; gap: 8px; }
-  .search-bar input { flex: 1; }
-  .search-bar .btn { width: auto; padding: 11px 16px; flex-shrink: 0; }
-
-  /* SUPERMERCADOS LISTA */
-  .market-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--gris-borde); }
-  .market-item:last-child { border-bottom: none; }
-  .market-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-  .market-name { flex: 1; font-size: 14px; font-weight: 500; }
-  .market-url { font-size: 11px; color: var(--texto-sec); }
-  .market-del { background: none; border: none; color: #ccc; font-size: 20px; cursor: pointer; padding: 4px; }
-
-  /* RESULTADOS BÚSQUEDA */
-  .result-found { background: var(--verde-claro); border: 1.5px solid var(--verde); border-radius: var(--radio); padding: 12px 14px; margin-top: 10px; }
-  .result-found .prod-name { font-size: 15px; font-weight: 600; color: var(--verde-oscuro); }
-  .result-found .prod-meta { font-size: 12px; color: var(--texto-sec); margin-top: 2px; }
-
-  /* LOADING */
-  .loading { display: flex; align-items: center; gap: 8px; padding: 12px 0; color: var(--texto-sec); font-size: 14px; }
-  .spinner { width: 18px; height: 18px; border: 2px solid var(--gris-borde); border-top-color: var(--verde); border-radius: 50%; animation: spin 0.7s linear infinite; flex-shrink: 0; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-
-  /* PRECIOS POR SUPER */
-  .price-inputs { margin-top: 10px; }
-  .price-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-  .price-row .mkt-label { display: flex; align-items: center; gap: 6px; min-width: 100px; font-size: 13px; font-weight: 500; }
-  .price-row input { flex: 1; text-align: right; }
-
-  /* CARRITO */
-  .cart-item { padding: 10px 0; border-bottom: 1px solid var(--gris-borde); }
-  .cart-item:last-child { border-bottom: none; }
-  .cart-item-name { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
-  .cart-item-prices { display: flex; flex-wrap: wrap; gap: 6px; }
-  .price-pill { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 20px; font-size: 12px; background: var(--gris); }
-  .price-pill.best { background: var(--verde-claro); color: var(--verde-oscuro); font-weight: 600; }
-  .price-pill.worst { background: var(--rojo-claro); color: var(--rojo); }
-
-  /* COMPARACIÓN */
-  .compare-total { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--gris-borde); }
-  .compare-total:last-child { border-bottom: none; }
-  .compare-mkt { display: flex; align-items: center; gap: 8px; }
-  .compare-mkt-name { font-size: 15px; font-weight: 600; }
-  .compare-mkt-count { font-size: 11px; color: var(--texto-sec); }
-  .compare-price { font-size: 18px; font-weight: 700; }
-  .compare-price.best { color: var(--verde); }
-  .badge { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 20px; text-transform: uppercase; }
-  .badge-best { background: var(--verde-claro); color: var(--verde); }
-  .badge-worst { background: var(--rojo-claro); color: var(--rojo); }
-
-  /* AHORRO BANNER */
-  .ahorro-banner { background: var(--verde); color: #fff; border-radius: var(--radio); padding: 14px 16px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }
-  .ahorro-label { font-size: 13px; opacity: 0.85; }
-  .ahorro-monto { font-size: 22px; font-weight: 700; }
-
-  /* MÉTRICAS */
-  .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
-  .metric { background: #fff; border-radius: 10px; padding: 12px; box-shadow: var(--sombra); }
-  .metric-val { font-size: 20px; font-weight: 700; color: var(--texto); }
-  .metric-lbl { font-size: 11px; color: var(--texto-sec); margin-top: 2px; }
-
-  /* NOTA */
-  .nota { background: #fff8e7; border-left: 3px solid #f0a500; border-radius: 0 8px 8px 0; padding: 10px 12px; font-size: 12px; color: #7a5c00; margin-bottom: 12px; line-height: 1.5; }
-
-  /* API STATUS */
-  .api-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--texto-sec); padding: 8px 0; }
-  .status-dot { width: 8px; height: 8px; border-radius: 50%; }
-  .status-dot.ok { background: var(--verde); }
-  .status-dot.error { background: var(--rojo); }
-  .status-dot.pending { background: #f0a500; animation: pulse 1s infinite; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-
-  .empty { text-align: center; padding: 30px 20px; color: var(--texto-sec); font-size: 14px; }
-  .empty-icon { font-size: 36px; margin-bottom: 8px; }
-
-  /* SETTINGS PANEL */
-  .panel { display: none; position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,0.5); }
-  .panel.open { display: flex; align-items: flex-end; }
-  .panel-inner { background: #fff; border-radius: 20px 20px 0 0; padding: 20px 16px; width: 100%; max-height: 80vh; overflow-y: auto; }
-  .panel-handle { width: 36px; height: 4px; background: #ddd; border-radius: 2px; margin: 0 auto 16px; }
-  .panel-title { font-size: 16px; font-weight: 700; margin-bottom: 14px; }
-
-  /* Barra de progreso comparación */
-  .progress-bar { height: 4px; background: var(--gris-borde); border-radius: 2px; margin-top: 6px; overflow: hidden; }
-  .progress-fill { height: 100%; border-radius: 2px; transition: width 0.3s; }
-
-  .cart-badge { display: inline-block; background: var(--rojo); color: #fff; border-radius: 10px; padding: 1px 6px; font-size: 10px; font-weight: 700; margin-left: 3px; vertical-align: middle; }
-
-  /* Resultado automático por supermercado */
-  .auto-result { border: 1px solid var(--gris-borde); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
-  .auto-result.found { border-color: var(--verde); background: var(--verde-claro); }
-  .auto-result.not-found { background: var(--gris); }
-  .auto-result.searching { opacity: 0.7; }
-  .auto-result-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
-  .auto-result-name { font-size: 13px; font-weight: 500; flex: 1; }
-  .auto-result-price { font-size: 16px; font-weight: 700; color: var(--verde-oscuro); }
-  .auto-result-prodname { font-size: 11px; color: var(--texto-sec); }
-</style>
-</head>
-<body>
-
-<!-- HEADER -->
-<div class="header">
-  <div class="header-icon">
-    <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-      <path d="M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4z"/>
-      <line x1="3" y1="6" x2="21" y2="6"/>
-      <path d="M16 10a4 4 0 01-8 0"/>
-    </svg>
-  </div>
-  <div>
-    <div class="header-title">SuperComparador</div>
-    <div class="header-sub">Paraguay</div>
-  </div>
-  <button class="header-settings" onclick="openSettings()">⚙ Config</button>
-</div>
-
-<!-- TABS -->
-<div class="tabs">
-  <button class="tab active" onclick="showTab('buscar')">Buscar</button>
-  <button class="tab" onclick="showTab('carrito')">Carrito <span id="cart-badge"></span></button>
-  <button class="tab" onclick="showTab('comparar')">Comparar</button>
-  <button class="tab" onclick="showTab('supers')">Supers</button>
-</div>
-
-<!-- CONTENIDO -->
-<div class="content">
-
-  <!-- TAB: BUSCAR -->
-  <div id="tab-buscar" class="section active">
-    <div id="api-status-bar" class="card" style="padding:10px 14px;">
-      <div class="api-status">
-        <div class="status-dot pending" id="status-dot"></div>
-        <span id="status-text">Verificando conexión con el servidor...</span>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">Buscar producto</div>
-      <div class="search-bar">
-        <input type="text" id="barcode-input" placeholder="Código de barras o nombre..." maxlength="60"/>
-        <button class="btn btn-primary" onclick="buscarProducto()">Buscar</button>
-      </div>
-      <div id="search-status"></div>
-    </div>
-
-    <div id="results-container"></div>
-  </div>
-
-  <!-- TAB: CARRITO -->
-  <div id="tab-carrito" class="section">
-    <div id="carrito-view"></div>
-  </div>
-
-  <!-- TAB: COMPARAR -->
-  <div id="tab-comparar" class="section">
-    <div id="compare-view"></div>
-  </div>
-
-  <!-- TAB: SUPERMERCADOS -->
-  <div id="tab-supers" class="section">
-    <div class="card">
-      <div class="card-title">Agregar supermercado</div>
-      <div class="input-group">
-        <div class="input-label">Nombre</div>
-        <input type="text" id="new-mkt-name" placeholder="Ej: Biggie, Stock..."/>
-      </div>
-      <div class="input-group">
-        <div class="input-label">URL del sitio</div>
-        <input type="url" id="new-mkt-url" placeholder="https://biggie.com.py/"/>
-      </div>
-      <button class="btn btn-primary" onclick="agregarSuper()">+ Agregar</button>
-    </div>
-    <div class="card">
-      <div class="card-title">Supermercados activos</div>
-      <div id="supers-list"></div>
-    </div>
-    <div class="nota">Los supermercados marcados con scrapers específicos (Biggie, Stock, Superseis, Salemma, Real) tienen mejor extracción de precios. Otros usarán el scraper genérico.</div>
-  </div>
-
-</div><!-- /content -->
-
-<!-- PANEL CONFIGURACIÓN -->
-<div class="panel" id="settings-panel" onclick="closeSettingsOutside(event)">
-  <div class="panel-inner">
-    <div class="panel-handle"></div>
-    <div class="panel-title">Configuración del servidor</div>
-    <div class="input-group">
-      <div class="input-label">URL del servidor (Render.com)</div>
-      <input type="url" id="api-url-input" placeholder="https://supercomparador-py.onrender.com"/>
-    </div>
-    <div id="panel-status" style="margin-bottom:10px;"></div>
-    <div class="btn-row">
-      <button class="btn btn-secondary" onclick="closeSettings()">Cancelar</button>
-      <button class="btn btn-primary" onclick="guardarConfig()">Guardar</button>
-    </div>
-    <div style="margin-top:14px;">
-      <div class="card-title">Cómo conseguir tu URL</div>
-      <ol style="font-size:13px;line-height:1.8;padding-left:18px;color:var(--texto-sec);">
-        <li>Subí el backend a GitHub</li>
-        <li>Creá cuenta gratis en <strong>render.com</strong></li>
-        <li>New Web Service → conectá tu repo</li>
-        <li>Pegá la URL que te da Render acá arriba</li>
-      </ol>
-    </div>
-  </div>
-</div>
-
-<script>
-// ─── ESTADO ───────────────────────────────────
-const DEFAULT_MARKETS = [
-  { id:1, name:'Biggie',    url:'https://biggie.com.py/', color:'#1B6B3A' },
-  { id:2, name:'Stock',     url:'https://www.stock.com.py/', color:'#0C447C' },
-  { id:3, name:'Superseis', url:'https://www.superseis.com.py/', color:'#BA7517' },
-  { id:4, name:'Salemma',   url:'https://www.salemmaonline.com.py/', color:'#993556' },
-  { id:5, name:'Real',      url:'https://www.realonline.com.py/', color:'#534AB7' },
-];
-const COLORS = ['#1B6B3A','#0C447C','#BA7517','#993556','#534AB7','#0F6E56','#A32D2D','#444441'];
-
-let state = {
-  apiUrl: localStorage.getItem('api_url') || '',
-  markets: JSON.parse(localStorage.getItem('markets') || 'null') || DEFAULT_MARKETS,
-  cart: JSON.parse(localStorage.getItem('cart') || '[]'),
-  mktCounter: parseInt(localStorage.getItem('mktCounter') || '6'),
-};
-
-function save() {
-  localStorage.setItem('markets', JSON.stringify(state.markets));
-  localStorage.setItem('cart', JSON.stringify(state.cart));
-  localStorage.setItem('mktCounter', state.mktCounter);
-  if(state.apiUrl) localStorage.setItem('api_url', state.apiUrl);
-}
-
-// ─── NAVEGACIÓN ───────────────────────────────
-function showTab(name) {
-  document.querySelectorAll('.tab').forEach((t,i) => {
-    t.classList.toggle('active', ['buscar','carrito','comparar','supers'][i] === name);
-  });
-  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
-  document.getElementById('tab-'+name).classList.add('active');
-  if(name==='carrito') renderCarrito();
-  if(name==='comparar') renderComparar();
-  if(name==='supers') renderSupers();
-}
-
-function updateBadge() {
-  const b = document.getElementById('cart-badge');
-  b.innerHTML = state.cart.length > 0 ? `<span class="cart-badge">${state.cart.length}</span>` : '';
-}
-
-// ─── CONFIGURACIÓN ────────────────────────────
-function openSettings() {
-  document.getElementById('api-url-input').value = state.apiUrl;
-  document.getElementById('settings-panel').classList.add('open');
-}
-function closeSettings() {
-  document.getElementById('settings-panel').classList.remove('open');
-}
-function closeSettingsOutside(e) {
-  if(e.target.id === 'settings-panel') closeSettings();
-}
-function guardarConfig() {
-  const url = document.getElementById('api-url-input').value.trim().replace(/\/$/, '');
-  state.apiUrl = url;
-  save();
-  closeSettings();
-  checkApiStatus();
-}
-
-// ─── STATUS API ───────────────────────────────
-async function checkApiStatus() {
-  const dot = document.getElementById('status-dot');
-  const txt = document.getElementById('status-text');
-  if(!state.apiUrl) {
-    dot.className = 'status-dot error';
-    txt.textContent = 'No hay servidor configurado. Tocá ⚙ Config para agregar tu URL de Render.com.';
-    return;
-  }
-  dot.className = 'status-dot pending';
-  txt.textContent = 'Conectando con el servidor...';
-  try {
-    const r = await fetch(`${state.apiUrl}/ping`, { signal: AbortSignal.timeout(8000) });
-    if(r.ok) {
-      dot.className = 'status-dot ok';
-      txt.textContent = `Servidor conectado: ${state.apiUrl.replace('https://','').split('.')[0]}...`;
-    } else {
-      throw new Error('status '+r.status);
+def get_headers(referer=None, json_req=False):
+    global _ua_idx
+    h = {
+        "User-Agent": USER_AGENTS[_ua_idx % len(USER_AGENTS)],
+        "Accept-Language": "es-PY,es;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
     }
-  } catch(e) {
-    dot.className = 'status-dot error';
-    txt.textContent = 'Error de conexión. Verificá la URL del servidor.';
-  }
-}
+    _ua_idx += 1
+    if json_req:
+        h["Accept"] = "application/json, text/plain, */*"
+        h["X-Requested-With"] = "XMLHttpRequest"
+    else:
+        h["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+        h["Upgrade-Insecure-Requests"] = "1"
+    if referer:
+        h["Referer"] = referer
+    return h
 
-// ─── BUSCAR PRODUCTO ──────────────────────────
-async function buscarProducto() {
-  const query = document.getElementById('barcode-input').value.trim();
-  if(!query) return;
-  if(!state.apiUrl) {
-    alert('Primero configurá la URL del servidor en ⚙ Config');
-    return;
-  }
+def fetch_html(url, referer=None, timeout=20):
+    try:
+        r = requests.get(url, headers=get_headers(referer=referer), timeout=timeout, allow_redirects=True)
+        logger.info(f"GET {url} → {r.status_code}")
+        return r.text if r.status_code == 200 else None
+    except Exception as e:
+        logger.warning(f"fetch_html error {url}: {e}")
+        return None
 
-  const statusEl = document.getElementById('search-status');
-  const resultsEl = document.getElementById('results-container');
+def fetch_json(url, referer=None, timeout=15):
+    try:
+        r = requests.get(url, headers=get_headers(referer=referer, json_req=True), timeout=timeout)
+        logger.info(f"JSON {url} → {r.status_code}")
+        if r.status_code == 200:
+            return r.json()
+        return None
+    except Exception as e:
+        logger.warning(f"fetch_json error {url}: {e}")
+        return None
 
-  statusEl.innerHTML = `<div class="loading"><div class="spinner"></div>Buscando en ${state.markets.length} supermercados...</div>`;
-  resultsEl.innerHTML = '';
+def limpiar_precio(texto):
+    if not texto: return None
+    limpio = re.sub(r"[^\d.,]", "", str(texto).strip())
+    if not limpio: return None
+    if "," in limpio:
+        partes = limpio.split(",")
+        limpio = partes[0].replace(".", "") + "." + (partes[1] if len(partes) > 1 else "0")
+    else:
+        partes = limpio.split(".")
+        limpio = "".join(partes) if (len(partes) > 1 and len(partes[-1]) == 3) else limpio.replace(".", "")
+    try:
+        val = float(limpio)
+        return val if val > 100 else None
+    except ValueError:
+        return None
 
-  // Construir payload para /buscar-custom
-  const payload = {
-    barcode: query,
-    supermercados: state.markets.map(m => ({ nombre: m.name, url: m.url }))
-  };
-
-  try {
-    const r = await fetch(`${state.apiUrl}/buscar-custom`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(60000)
-    });
-
-    if(!r.ok) throw new Error('HTTP ' + r.status);
-    const data = await r.json();
-    statusEl.innerHTML = '';
-    renderResultados(data, query);
-  } catch(e) {
-    statusEl.innerHTML = '';
-    resultsEl.innerHTML = `<div class="card" style="color:var(--rojo);text-align:center;padding:20px;">
-      Error al conectar con el servidor.<br><small>${e.message}</small>
-    </div>`;
-  }
-}
-
-function renderResultados(data, query) {
-  const el = document.getElementById('results-container');
-  const resultados = data.resultados || [];
-  const disponibles = resultados.filter(r => r.disponible);
-
-  let html = '';
-
-  // Banner resumen
-  if(disponibles.length > 0) {
-    const minP = data.precio_minimo;
-    const best = resultados.find(r => r.precio === minP);
-    html += `<div class="ahorro-banner">
-      <div>
-        <div class="ahorro-label">Mejor precio en</div>
-        <div class="ahorro-monto">${best?.supermercado || '-'}</div>
-      </div>
-      <div style="text-align:right;">
-        <div class="ahorro-label">Encontrado en ${disponibles.length}/${resultados.length} supers</div>
-        <div class="ahorro-monto">Gs. ${fmtPrecio(minP)}</div>
-      </div>
-    </div>`;
-  }
-
-  html += '<div class="card"><div class="card-title">Resultados por supermercado</div>';
-
-  resultados.forEach(r => {
-    const isBest = r.precio === data.precio_minimo && r.disponible;
-    const isWorst = r.precio === data.precio_maximo && r.disponible && data.precio_minimo !== data.precio_maximo;
-    const mkt = state.markets.find(m => m.name === r.supermercado);
-    const color = mkt?.color || '#888';
-
-    html += `<div class="auto-result ${r.disponible ? 'found' : 'not-found'}">
-      <div class="auto-result-header">
-        <div style="width:10px;height:10px;border-radius:50%;background:${color};flex-shrink:0;"></div>
-        <div class="auto-result-name">${r.supermercado}</div>
-        ${isBest ? '<span class="badge badge-best">Más barato</span>' : ''}
-        ${isWorst ? '<span class="badge badge-worst">Más caro</span>' : ''}
-      </div>
-      ${r.disponible ? `
-        <div class="auto-result-price">Gs. ${fmtPrecio(r.precio)}</div>
-        <div class="auto-result-prodname">${r.nombre || ''}</div>
-        <a href="${r.url_producto}" target="_blank" style="font-size:11px;color:var(--verde);text-decoration:none;">Ver en sitio web ↗</a>
-      ` : `
-        <div style="font-size:12px;color:var(--texto-sec);">${r.error || 'No encontrado'}</div>
-        <a href="${r.url_producto}" target="_blank" style="font-size:11px;color:var(--texto-sec);text-decoration:none;">Buscar manualmente ↗</a>
-      `}
-    </div>`;
-  });
-
-  html += '</div>';
-
-  // Botón agregar al carrito si hay al menos un precio
-  if(disponibles.length > 0) {
-    html += `<button class="btn btn-primary" style="margin-bottom:12px;" onclick="agregarAlCarrito(${JSON.stringify(data).split('"').join("'")})">
-      + Agregar al carrito
-    </button>`;
-  }
-
-  el.innerHTML = html;
-}
-
-// ─── CARRITO ──────────────────────────────────
-function agregarAlCarrito(data) {
-  // data viene del resultado de búsqueda
-  const item = {
-    id: Date.now(),
-    barcode: data.barcode,
-    nombre: data.resultados?.find(r => r.nombre)?.nombre || data.barcode,
-    precios: {}
-  };
-  data.resultados?.forEach(r => {
-    if(r.disponible && r.precio) {
-      item.precios[r.supermercado] = {
-        precio: r.precio,
-        nombre: r.nombre,
-        url: r.url_producto,
-      };
+def build_result(supermercado, url_base, barcode):
+    return {
+        "supermercado": supermercado,
+        "url_supermercado": url_base,
+        "barcode": barcode,
+        "nombre": None,
+        "precio": None,
+        "url_producto": f"{url_base.rstrip('/')}/search?q={barcode}",
+        "imagen": None,
+        "disponible": False,
+        "error": None,
     }
-  });
-  state.cart.push(item);
-  save();
-  updateBadge();
-  document.getElementById('results-container').innerHTML = '';
-  document.getElementById('search-status').innerHTML = '';
-  document.getElementById('barcode-input').value = '';
-  showTab('carrito');
+
+def extraer_precio_texto(texto):
+    """Busca patrones de precio en guaraníes dentro de un texto"""
+    patrones = [
+        r'[Gg]s\.?\s*([\d][.\d]+)',
+        r'₲\s*([\d][.\d]+)',
+        r'"[Pp]rice[^"]*":\s*"?([\d]+\.?[\d]*)"?',
+        r'"[Pp]recio[^"]*":\s*"?([\d]+\.?[\d]*)"?',
+    ]
+    for pat in patrones:
+        matches = re.findall(pat, texto)
+        for m in matches:
+            p = limpiar_precio(m)
+            if p and p > 1000:
+                return p
+    return None
+
+def extraer_precio_soup(soup):
+    selectores = [
+        # Biggie específico
+        ".price", "[class*='price']", "[class*='Price']",
+        # Superseis
+        ".product-price", "span.price", ".precio",
+        # Genéricos
+        "[data-price]", "[itemprop='price']",
+    ]
+    for sel in selectores:
+        try:
+            elementos = soup.select(sel)
+            for el in elementos:
+                # Intentar atributo content primero (schema.org)
+                content = el.get("content") or el.get("data-price")
+                if content:
+                    p = limpiar_precio(content)
+                    if p: return p
+                txt = el.get_text(strip=True)
+                if txt:
+                    p = limpiar_precio(txt)
+                    if p: return p
+        except Exception:
+            continue
+    # Último recurso: buscar en todo el texto
+    return extraer_precio_texto(soup.get_text())
+
+# ══════════════════════════════════════════════
+# BIGGIE — sistema propio (NO es Shopify)
+# URL búsqueda: biggie.com.py/search?q=BARCODE
+# Producto muestra precio como "₲ 12.000"
+# ══════════════════════════════════════════════
+def scrape_biggie(barcode):
+    base = "https://biggie.com.py"
+    r = build_result("Biggie", base, barcode)
+    search_url = f"{base}/search?q={barcode}"
+    r["url_producto"] = search_url
+
+    html = fetch_html(search_url)
+    if not html:
+        r["error"] = "No se pudo conectar"
+        return r
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Buscar tarjeta de producto en resultados
+    # Biggie muestra precio directamente en la tarjeta de búsqueda
+    # Selector basado en lo que se ve: precio y nombre en card
+    card = soup.select_one(".product-card, .product-item, [class*='product']")
+
+    # Precio directo en resultados de búsqueda
+    precio_el = soup.select_one(".price, [class*='price'], [class*='Price']")
+    if precio_el:
+        p = limpiar_precio(precio_el.get_text())
+        if p:
+            r["precio"] = p
+
+    # Nombre del producto
+    nombre_el = soup.select_one(".product-title, .product-name, h2, h3, [class*='title']")
+    if nombre_el:
+        r["nombre"] = nombre_el.get_text(strip=True)
+
+    # Si no encontró precio en resultados, entrar al producto
+    if not r["precio"]:
+        link = soup.select_one("a[href*='/product'], a[href*='/productos'], a[href*='/p/']")
+        if not link:
+            # Buscar cualquier link que lleve a un producto
+            for a in soup.select("a[href]"):
+                href = a.get("href", "")
+                if any(x in href for x in ["/product", "/item", "/p/"]):
+                    link = a
+                    break
+
+        if link:
+            prod_url = urljoin(base, link.get("href", ""))
+            r["url_producto"] = prod_url
+            time.sleep(1)
+            html2 = fetch_html(prod_url, referer=search_url)
+            if html2:
+                soup2 = BeautifulSoup(html2, "html.parser")
+                h1 = soup2.select_one("h1")
+                if h1: r["nombre"] = h1.get_text(strip=True)
+                r["precio"] = extraer_precio_soup(soup2)
+
+    # Si todavía no hay precio, buscar en el HTML completo
+    if not r["precio"]:
+        r["precio"] = extraer_precio_texto(html)
+
+    r["disponible"] = r["precio"] is not None
+    if not r["disponible"]:
+        r["error"] = "Producto no encontrado"
+    return r
+
+
+# ══════════════════════════════════════════════
+# STOCK — ASP.NET propio
+# No tiene API VTEX. Buscar via HTML.
+# ══════════════════════════════════════════════
+def scrape_stock(barcode):
+    base = "https://www.stock.com.py"
+    r = build_result("Stock", base, barcode)
+
+    # Probar diferentes URLs de búsqueda
+    search_urls = [
+        f"{base}/search?q={barcode}",
+        f"{base}/buscar?q={barcode}",
+        f"{base}/productos?search={barcode}",
+        f"{base}/Search?q={barcode}",
+    ]
+
+    html = None
+    search_url_used = search_urls[0]
+    for url in search_urls:
+        html = fetch_html(url)
+        if html and len(html) > 5000:
+            search_url_used = url
+            r["url_producto"] = url
+            break
+        time.sleep(0.3)
+
+    if not html:
+        r["error"] = "No se pudo conectar"
+        return r
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Buscar precio directo en resultados
+    r["precio"] = extraer_precio_soup(soup)
+
+    # Buscar nombre
+    nombre_el = soup.select_one("h2, h3, .product-title, .product-name, [class*='title']")
+    if nombre_el:
+        r["nombre"] = nombre_el.get_text(strip=True)
+
+    # Si no hay precio, entrar al producto
+    if not r["precio"]:
+        link = None
+        for a in soup.select("a[href]"):
+            href = a.get("href", "")
+            if any(x in href.lower() for x in ["/product", "/item", "/detalle", "/p/"]):
+                link = a
+                break
+
+        if link:
+            prod_url = urljoin(base, link.get("href", ""))
+            r["url_producto"] = prod_url
+            time.sleep(1)
+            html2 = fetch_html(prod_url, referer=search_url_used)
+            if html2:
+                soup2 = BeautifulSoup(html2, "html.parser")
+                h1 = soup2.select_one("h1")
+                if h1: r["nombre"] = h1.get_text(strip=True)
+                r["precio"] = extraer_precio_soup(soup2)
+
+    r["disponible"] = r["precio"] is not None
+    if not r["disponible"]:
+        r["error"] = "Producto no encontrado"
+    return r
+
+
+# ══════════════════════════════════════════════
+# SUPERSEIS — sistema propio
+# URL búsqueda: superseis.com.py/search?search=BARCODE
+# Precio: "₲ 12.000" visible en card
+# ══════════════════════════════════════════════
+def scrape_superseis(barcode):
+    base = "https://www.superseis.com.py"
+    r = build_result("Superseis", base, barcode)
+    search_url = f"{base}/search?search={barcode}"
+    r["url_producto"] = search_url
+
+    html = fetch_html(search_url)
+    if not html:
+        r["error"] = "No se pudo conectar"
+        return r
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Precio directo en card de resultado
+    precio_el = (soup.select_one(".product-price") or
+                 soup.select_one("span.price") or
+                 soup.select_one("[class*='price']"))
+    if precio_el:
+        p = limpiar_precio(precio_el.get_text())
+        if p: r["precio"] = p
+
+    # Nombre
+    nombre_el = (soup.select_one(".product-title") or
+                 soup.select_one("[class*='product-name']") or
+                 soup.select_one("h2") or soup.select_one("h3"))
+    if nombre_el:
+        r["nombre"] = nombre_el.get_text(strip=True)
+
+    # Entrar al producto si no hay precio
+    if not r["precio"]:
+        link = None
+        for a in soup.select("a[href]"):
+            href = a.get("href", "")
+            if "/product" in href or "/item" in href or href.count("/") >= 2:
+                if barcode in a.get_text() or nombre_el:
+                    link = a
+                    break
+        if not link:
+            link = soup.select_one("a.product-item-link, .product-item a, [class*='product'] a")
+
+        if link:
+            prod_url = urljoin(base, link.get("href", ""))
+            r["url_producto"] = prod_url
+            time.sleep(1)
+            html2 = fetch_html(prod_url, referer=search_url)
+            if html2:
+                soup2 = BeautifulSoup(html2, "html.parser")
+                h1 = soup2.select_one("h1")
+                if h1: r["nombre"] = h1.get_text(strip=True)
+                r["precio"] = extraer_precio_soup(soup2)
+
+    if not r["precio"]:
+        r["precio"] = extraer_precio_texto(html)
+
+    r["disponible"] = r["precio"] is not None
+    if not r["disponible"]:
+        r["error"] = "Producto no encontrado"
+    return r
+
+
+# ══════════════════════════════════════════════
+# SALEMMA
+# ══════════════════════════════════════════════
+def scrape_salemma(barcode):
+    base = "https://www.salemmaonline.com.py"
+    r = build_result("Salemma", base, barcode)
+    search_url = f"{base}/search?q={barcode}"
+    r["url_producto"] = search_url
+
+    html = fetch_html(search_url)
+    if not html:
+        r["error"] = "No se pudo conectar"
+        return r
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    precio_el = soup.select_one("[class*='price'], span.money")
+    if precio_el:
+        p = limpiar_precio(precio_el.get_text())
+        if p: r["precio"] = p
+
+    nombre_el = soup.select_one("h2, h3, [class*='title']")
+    if nombre_el:
+        r["nombre"] = nombre_el.get_text(strip=True)
+
+    if not r["precio"]:
+        link = soup.select_one("a[href*='/product'], a[href*='/item']")
+        if link:
+            prod_url = urljoin(base, link.get("href", ""))
+            r["url_producto"] = prod_url
+            time.sleep(1)
+            html2 = fetch_html(prod_url, referer=search_url)
+            if html2:
+                soup2 = BeautifulSoup(html2, "html.parser")
+                h1 = soup2.select_one("h1")
+                if h1: r["nombre"] = h1.get_text(strip=True)
+                r["precio"] = extraer_precio_soup(soup2)
+
+    if not r["precio"]:
+        r["precio"] = extraer_precio_texto(html)
+
+    r["disponible"] = r["precio"] is not None
+    if not r["disponible"]:
+        r["error"] = "Producto no encontrado"
+    return r
+
+
+# ══════════════════════════════════════════════
+# REAL
+# ══════════════════════════════════════════════
+def scrape_real(barcode):
+    base = "https://www.realonline.com.py"
+    r = build_result("Real", base, barcode)
+    search_url = f"{base}/search?q={barcode}"
+    r["url_producto"] = search_url
+
+    html = fetch_html(search_url)
+    if not html:
+        r["error"] = "No se pudo conectar"
+        return r
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    precio_el = soup.select_one("[class*='price'], [class*='Price'], .priceText")
+    if precio_el:
+        p = limpiar_precio(precio_el.get_text())
+        if p: r["precio"] = p
+
+    nombre_el = soup.select_one("h2, h3, [class*='ProductName'], [class*='product-name']")
+    if nombre_el:
+        r["nombre"] = nombre_el.get_text(strip=True)
+
+    if not r["precio"]:
+        link = soup.select_one("a[href*='/p/'], a[href*='/product'], a.product-name")
+        if link:
+            prod_url = urljoin(base, link.get("href", ""))
+            r["url_producto"] = prod_url
+            time.sleep(1)
+            html2 = fetch_html(prod_url, referer=search_url)
+            if html2:
+                soup2 = BeautifulSoup(html2, "html.parser")
+                h1 = soup2.select_one("h1")
+                if h1: r["nombre"] = h1.get_text(strip=True)
+                r["precio"] = extraer_precio_soup(soup2)
+
+    if not r["precio"]:
+        r["precio"] = extraer_precio_texto(html)
+
+    r["disponible"] = r["precio"] is not None
+    if not r["disponible"]:
+        r["error"] = "Producto no encontrado"
+    return r
+
+
+# ══════════════════════════════════════════════
+# GENÉRICO
+# ══════════════════════════════════════════════
+def scrape_generico(barcode, nombre, url_base):
+    r = build_result(nombre, url_base, barcode)
+    patterns = [
+        f"{url_base.rstrip('/')}/search?q={barcode}",
+        f"{url_base.rstrip('/')}/search?search={barcode}",
+        f"{url_base.rstrip('/')}/buscar?q={barcode}",
+        f"{url_base.rstrip('/')}/catalogsearch/result/?q={barcode}",
+    ]
+    for url in patterns:
+        html = fetch_html(url)
+        if not html or len(html) < 3000: continue
+        r["url_producto"] = url
+        soup = BeautifulSoup(html, "html.parser")
+        r["precio"] = extraer_precio_soup(soup)
+        if r["precio"]:
+            nombre_el = soup.select_one("h1, h2, h3, [class*='title'], [class*='name']")
+            if nombre_el: r["nombre"] = nombre_el.get_text(strip=True)
+            r["disponible"] = True
+            return r
+        time.sleep(0.5)
+    r["error"] = "Producto no encontrado"
+    return r
+
+
+SCRAPERS_MAP = {
+    "biggie.com.py": lambda b: scrape_biggie(b),
+    "biggie.com":    lambda b: scrape_biggie(b),
+    "salemmaonline.com.py": lambda b: scrape_salemma(b),
+    "stock.com.py":  lambda b: scrape_stock(b),
+    "realonline.com.py": lambda b: scrape_real(b),
+    "superseis.com.py": lambda b: scrape_superseis(b),
 }
 
-function renderCarrito() {
-  const el = document.getElementById('carrito-view');
-  if(state.cart.length === 0) {
-    el.innerHTML = `<div class="card"><div class="empty">
-      <div class="empty-icon">🛒</div>
-      El carrito está vacío.<br>Buscá productos en la pestaña "Buscar".
-    </div></div>`;
-    return;
-  }
+def get_scraper(url):
+    domain = urlparse(url).netloc.lower().replace("www.", "")
+    return SCRAPERS_MAP.get(domain, None)
 
-  let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-    <div style="font-size:14px;font-weight:600;">${state.cart.length} producto${state.cart.length>1?'s':''}</div>
-    <button class="btn btn-danger btn-sm" onclick="vaciarCarrito()">Vaciar todo</button>
-  </div>`;
+def calcular_resumen(barcode, resultados):
+    precios = [r["precio"] for r in resultados if r["precio"]]
+    return {
+        "barcode": barcode,
+        "total_supermercados": len(resultados),
+        "encontrado_en": len(precios),
+        "precio_minimo": min(precios) if precios else None,
+        "precio_maximo": max(precios) if precios else None,
+        "ahorro_maximo": round(max(precios) - min(precios), 0) if len(precios) >= 2 else 0,
+        "resultados": resultados,
+    }
 
-  state.cart.forEach((item, idx) => {
-    const precios = Object.entries(item.precios);
-    const vals = precios.map(([,v]) => v.precio);
-    const minP = vals.length ? Math.min(...vals) : null;
-    const maxP = vals.length ? Math.max(...vals) : null;
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({"api": "SuperComparador Paraguay", "version": "5.0", "estado": "online"})
 
-    html += `<div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;">
-        <div>
-          <div class="cart-item-name">${item.nombre}</div>
-          <div style="font-size:11px;color:var(--texto-sec);">Cód: ${item.barcode}</div>
-        </div>
-        <button class="btn btn-danger btn-sm" onclick="quitarDelCarrito(${idx})">✕</button>
-      </div>
-      <div class="cart-item-prices">
-        ${precios.sort((a,b)=>a[1].precio-b[1].precio).map(([mkt, v]) => {
-          const isBest = v.precio === minP;
-          const isWorst = v.precio === maxP && minP !== maxP;
-          return `<span class="price-pill ${isBest?'best':isWorst?'worst':''}">
-            ${mkt}: Gs. ${fmtPrecio(v.precio)}
-          </span>`;
-        }).join('')}
-        ${precios.length === 0 ? '<span style="font-size:12px;color:var(--texto-sec);">Sin precios cargados</span>' : ''}
-      </div>
-    </div>`;
-  });
+@app.route("/ping", methods=["GET"])
+def ping():
+    return jsonify({"status": "ok", "version": "5.0"})
 
-  el.innerHTML = html;
-}
+@app.route("/buscar", methods=["GET"])
+def buscar():
+    barcode = request.args.get("barcode", "").strip()
+    if not barcode:
+        return jsonify({"error": "barcode requerido"}), 400
+    logger.info(f"Buscando: {barcode}")
+    resultados = []
+    for fn in [scrape_biggie, scrape_stock, scrape_superseis, scrape_salemma, scrape_real]:
+        try: resultados.append(fn(barcode))
+        except Exception as e: logger.error(str(e))
+    return jsonify(calcular_resumen(barcode, resultados))
 
-function vaciarCarrito() {
-  if(confirm('¿Vaciar todo el carrito?')) {
-    state.cart = [];
-    save();
-    updateBadge();
-    renderCarrito();
-  }
-}
+@app.route("/buscar-custom", methods=["POST"])
+def buscar_custom():
+    data = request.get_json()
+    if not data: return jsonify({"error": "Body JSON requerido"}), 400
+    barcode = data.get("barcode", "").strip()
+    supermercados = data.get("supermercados", [])
+    if not barcode: return jsonify({"error": "barcode requerido"}), 400
+    if not supermercados: return jsonify({"error": "supermercados requerido"}), 400
+    resultados = []
+    for item in supermercados:
+        nombre = item.get("nombre", "Supermercado")
+        url = item.get("url", "")
+        if not url: continue
+        fn = get_scraper(url)
+        res = fn(barcode) if fn else scrape_generico(barcode, nombre, url)
+        res["supermercado"] = nombre
+        resultados.append(res)
+    return jsonify(calcular_resumen(barcode, resultados))
 
-function quitarDelCarrito(idx) {
-  state.cart.splice(idx, 1);
-  save();
-  updateBadge();
-  renderCarrito();
-}
-
-// ─── COMPARAR ─────────────────────────────────
-function renderComparar() {
-  const el = document.getElementById('compare-view');
-  if(state.cart.length === 0) {
-    el.innerHTML = `<div class="card"><div class="empty">
-      <div class="empty-icon">📊</div>
-      Agregá productos al carrito para comparar precios.
-    </div></div>`;
-    return;
-  }
-
-  // Totales por supermercado
-  const totals = {};
-  const counts = {};
-  state.markets.forEach(m => { totals[m.name] = 0; counts[m.name] = 0; });
-
-  state.cart.forEach(item => {
-    Object.entries(item.precios).forEach(([mkt, v]) => {
-      if(!totals[mkt]) totals[mkt] = 0;
-      totals[mkt] += v.precio;
-      if(!counts[mkt]) counts[mkt] = 0;
-      counts[mkt]++;
-    });
-  });
-
-  const mktsActivos = Object.entries(totals).filter(([, t]) => t > 0);
-  if(mktsActivos.length === 0) {
-    el.innerHTML = `<div class="card"><div class="empty">No hay precios cargados todavía.</div></div>`;
-    return;
-  }
-
-  const vals = mktsActivos.map(([,t]) => t);
-  const minT = Math.min(...vals);
-  const maxT = Math.max(...vals);
-  const best = mktsActivos.find(([,t]) => t === minT);
-  const ahorro = maxT - minT;
-
-  let html = '';
-
-  // Banner ahorro
-  if(ahorro > 0) {
-    html += `<div class="ahorro-banner">
-      <div>
-        <div class="ahorro-label">Comprando en ${best[0]} ahorrás</div>
-        <div class="ahorro-monto">Gs. ${fmtPrecio(ahorro)}</div>
-      </div>
-      <div style="text-align:right;opacity:0.85;font-size:13px;">vs. el super más caro</div>
-    </div>`;
-  }
-
-  // Métricas
-  html += `<div class="metrics">
-    <div class="metric"><div class="metric-val">${state.cart.length}</div><div class="metric-lbl">Productos</div></div>
-    <div class="metric"><div class="metric-val">${mktsActivos.length}</div><div class="metric-lbl">Supermercados</div></div>
-  </div>`;
-
-  // Totales por super
-  html += `<div class="card"><div class="card-title">Total del carrito</div>`;
-  mktsActivos.sort((a,b) => a[1]-b[1]).forEach(([mkt, total]) => {
-    const isBest = total === minT;
-    const isWorst = total === maxT && minT !== maxT;
-    const pct = maxT > minT ? ((total - minT)/(maxT - minT)*100) : 0;
-    const mktObj = state.markets.find(m => m.name === mkt);
-    const color = mktObj?.color || '#888';
-
-    html += `<div class="compare-total">
-      <div class="compare-mkt">
-        <div style="width:10px;height:10px;border-radius:50%;background:${color};flex-shrink:0;"></div>
-        <div>
-          <div class="compare-mkt-name">${mkt}</div>
-          <div class="compare-mkt-count">${counts[mkt]}/${state.cart.length} productos</div>
-          <div class="progress-bar" style="width:120px;">
-            <div class="progress-fill" style="width:${pct.toFixed(0)}%;background:${isWorst?'#c0392b':'#ccc'};"></div>
-          </div>
-        </div>
-      </div>
-      <div style="text-align:right;">
-        <div class="compare-price ${isBest?'best':''}">Gs. ${fmtPrecio(total)}</div>
-        ${isBest ? '<span class="badge badge-best">Mejor</span>' : ''}
-        ${isWorst ? '<span class="badge badge-worst">Más caro</span>' : ''}
-      </div>
-    </div>`;
-  });
-  html += '</div>';
-
-  // Detalle por producto
-  html += `<div class="card"><div class="card-title">Por producto</div>`;
-  state.cart.forEach(item => {
-    const precios = Object.entries(item.precios);
-    const vals2 = precios.map(([,v]) => v.precio);
-    const minP2 = vals2.length ? Math.min(...vals2) : null;
-    const maxP2 = vals2.length ? Math.max(...vals2) : null;
-
-    html += `<div style="margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--gris-borde);">
-      <div style="font-size:13px;font-weight:600;margin-bottom:6px;">${item.nombre}</div>
-      <div style="display:flex;flex-wrap:wrap;gap:5px;">
-        ${precios.sort((a,b)=>a[1].precio-b[1].precio).map(([mkt,v]) => {
-          const isBest = v.precio === minP2;
-          const isWorst = v.precio === maxP2 && minP2 !== maxP2;
-          return `<span class="price-pill ${isBest?'best':isWorst?'worst':''}">
-            ${mkt}: Gs. ${fmtPrecio(v.precio)}
-          </span>`;
-        }).join('')}
-      </div>
-    </div>`;
-  });
-  html += '</div>';
-
-  el.innerHTML = html;
-}
-
-// ─── SUPERMERCADOS ────────────────────────────
-function renderSupers() {
-  const el = document.getElementById('supers-list');
-  el.innerHTML = state.markets.map((m, idx) => `
-    <div class="market-item">
-      <div class="market-dot" style="background:${m.color || COLORS[idx % COLORS.length]}"></div>
-      <div style="flex:1;min-width:0;">
-        <div class="market-name">${m.name}</div>
-        <div class="market-url">${m.url}</div>
-      </div>
-      <button class="market-del" onclick="eliminarSuper(${m.id})">✕</button>
-    </div>
-  `).join('') || '<div style="font-size:13px;color:var(--texto-sec);">No hay supermercados.</div>';
-}
-
-function agregarSuper() {
-  const name = document.getElementById('new-mkt-name').value.trim();
-  const url = document.getElementById('new-mkt-url').value.trim();
-  if(!name || !url) { alert('Completá nombre y URL.'); return; }
-  const color = COLORS[state.mktCounter % COLORS.length];
-  state.markets.push({ id: state.mktCounter++, name, url, color });
-  save();
-  document.getElementById('new-mkt-name').value = '';
-  document.getElementById('new-mkt-url').value = '';
-  renderSupers();
-}
-
-function eliminarSuper(id) {
-  state.markets = state.markets.filter(m => m.id !== id);
-  save();
-  renderSupers();
-}
-
-// ─── UTILS ────────────────────────────────────
-function fmtPrecio(n) {
-  if(n == null) return '-';
-  return Math.round(n).toLocaleString('es-PY');
-}
-
-// ─── INIT ─────────────────────────────────────
-updateBadge();
-checkApiStatus();
-</script>
-</body>
-</html>
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
