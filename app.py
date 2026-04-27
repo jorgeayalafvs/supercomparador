@@ -22,45 +22,27 @@ USER_AGENTS = [
 ]
 _ua_idx = 0
 
-def get_headers():
+def get_headers(referer=None):
     global _ua_idx
-    ua = USER_AGENTS[_ua_idx % len(USER_AGENTS)]
-    _ua_idx += 1
-    return {
-        "User-Agent": ua,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "es-PY,es;q=0.9,en-US;q=0.8,en;q=0.7",
+    h = {
+        "User-Agent": USER_AGENTS[_ua_idx % len(USER_AGENTS)],
+        "Accept-Language": "es-PY,es;q=0.9,en;q=0.8",
         "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Upgrade-Insecure-Requests": "1",
-        "Cache-Control": "max-age=0",
     }
+    _ua_idx += 1
+    if referer: h["Referer"] = referer
+    return h
 
-def fetch(url, timeout=20, referer=None):
+def fetch(url, referer=None, timeout=20):
     try:
-        headers = get_headers()
-        if referer:
-            headers["Referer"] = referer
-        r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
-        logger.info(f"GET {url} -> {r.status_code}")
-        if r.status_code == 200:
-            return BeautifulSoup(r.text, "html.parser")
-        return None
+        r = requests.get(url, headers=get_headers(referer=referer), timeout=timeout, allow_redirects=True)
+        logger.info(f"GET {url} → {r.status_code} ({len(r.text)} bytes)")
+        return r.text if r.status_code == 200 else None
     except Exception as e:
         logger.warning(f"fetch error {url}: {e}")
-        return None
-
-def fetch_json(url, timeout=15):
-    try:
-        headers = get_headers()
-        headers["Accept"] = "application/json, text/plain, */*"
-        r = requests.get(url, headers=headers, timeout=timeout)
-        logger.info(f"JSON {url} -> {r.status_code}")
-        if r.status_code == 200:
-            return r.json()
-        return None
-    except Exception as e:
-        logger.warning(f"fetch_json error {url}: {e}")
         return None
 
 def limpiar_precio(texto):
@@ -75,39 +57,188 @@ def limpiar_precio(texto):
         limpio = "".join(partes) if (len(partes) > 1 and len(partes[-1]) == 3) else limpio.replace(".", "")
     try:
         val = float(limpio)
-        return val if val > 100 else None
+        return val if val > 500 else None
     except ValueError:
         return None
 
 def build_result(supermercado, url_base, barcode):
     return {
-        "supermercado": supermercado, "url_supermercado": url_base,
-        "barcode": barcode, "nombre": None, "precio": None,
+        "supermercado": supermercado,
+        "url_supermercado": url_base,
+        "barcode": barcode,
+        "nombre": None, "precio": None,
         "url_producto": f"{url_base.rstrip('/')}/search?q={barcode}",
         "imagen": None, "disponible": False, "error": None,
     }
 
-def extraer_precio_texto(texto):
-    """Busca patrones de precio en guaraníes en texto plano"""
-    patrones = [
-        r'[Gg]s\.?\s*([\d\.]+)',
-        r'[Gg][Ss]\s*([\d\.]+)',
-        r'₲\s*([\d\.]+)',
-        r'"[Pp]rice"["\s:]+(\d[\d\.]+)',
-        r'"[Pp]recio"["\s:]+(\d[\d\.]+)',
-    ]
-    for pat in patrones:
-        matches = re.findall(pat, texto)
-        for m in matches:
-            p = limpiar_precio(m)
-            if p and p > 1000:
-                return p
+def extraer_jsonld(soup):
+    """Extrae precio y nombre de JSON-LD (schema.org Product)"""
+    for sc in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(sc.string or "")
+            if isinstance(data, list): data = data[0]
+            tipo = data.get("@type", "")
+            if tipo == "Product":
+                nombre = data.get("name")
+                offers = data.get("offers", {})
+                if isinstance(offers, list): offers = offers[0]
+                precio = limpiar_precio(str(offers.get("price", "")))
+                if precio:
+                    return nombre, precio
+        except Exception:
+            continue
+    return None, None
+
+def extraer_og(soup):
+    """Extrae título de Open Graph"""
+    og = soup.find("meta", property="og:title")
+    if og: return og.get("content", "").strip()
     return None
 
+def precio_de_texto(texto):
+    """Busca patrón de precio en guaraníes dentro de un texto"""
+    patrones = [
+        r'[₲Gg][Ss]?\.?\s*([\d]{1,3}(?:[.\s][\d]{3})*)',
+        r'([\d]{4,7})\s*[₲Gg]',
+        r'"price"\s*:\s*"?([\d]+(?:\.\d+)?)"?',
+    ]
+    for pat in patrones:
+        for m in re.findall(pat, texto, re.IGNORECASE):
+            p = limpiar_precio(m)
+            if p and p > 500: return p
+    return None
+
+
 # ══════════════════════════════════════════════
-# BIGGIE — sitio propio con búsqueda /search?q=
-# Precio visible en card: ₲ 12.000
-# Selector: el precio está en span o div con texto "₲"
+# SALEMMA
+# Sistema propio. URL producto: /producto/SLUG
+# Precio en página: "Gs. 12.000 por unidad"
+# Código visible en página: "Codigo: 7840058002549"
+# ══════════════════════════════════════════════
+def scrape_salemma(barcode):
+    base = "https://www.salemmaonline.com.py"
+    r = build_result("Salemma", base, barcode)
+    search_url = f"{base}/search?q={barcode}"
+    r["url_producto"] = search_url
+
+    html = fetch(search_url)
+    if not html:
+        r["error"] = "No se pudo conectar"
+        return r
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Salemma muestra resultados de búsqueda — buscar link al producto
+    # El producto tiene el barcode en la URL o en el texto
+    prod_link = None
+
+    # Buscar links de producto (contienen /producto/ en la URL)
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if "/producto/" in href:
+            prod_link = urljoin(base, href)
+            break
+
+    if not prod_link:
+        r["error"] = "Producto no encontrado"
+        return r
+
+    r["url_producto"] = prod_link
+    time.sleep(1)
+    html2 = fetch(prod_link, referer=search_url)
+    if not html2:
+        r["error"] = "No se pudo acceder al producto"
+        return r
+
+    soup2 = BeautifulSoup(html2, "html.parser")
+
+    # Nombre: h1 o título OG
+    h1 = soup2.select_one("h1")
+    if h1:
+        r["nombre"] = h1.get_text(strip=True)
+    else:
+        r["nombre"] = extraer_og(soup2)
+
+    # Precio: buscar "Gs. 12.000" en el texto de la página
+    # Salemma usa: "Gs. 12.000 por unidad"
+    texto_precio = soup2.get_text(" ")
+    r["precio"] = precio_de_texto(texto_precio)
+
+    # Imagen
+    img = soup2.select_one("img[src*='producto'], img[src*='product'], .product-image img")
+    if img:
+        src = img.get("src", "")
+        r["imagen"] = urljoin(base, src) if src else None
+
+    r["disponible"] = r["precio"] is not None
+    if not r["disponible"]: r["error"] = "Precio no encontrado"
+    return r
+
+
+# ══════════════════════════════════════════════
+# SUPERSEIS
+# Sistema propio. URL producto: /product/SLUG
+# Precio en página: "₲ 12.000"
+# SKU visible: "7840058002549"
+# JSON-LD disponible en <head>
+# ══════════════════════════════════════════════
+def scrape_superseis(barcode):
+    base = "https://www.superseis.com.py"
+    r = build_result("Superseis", base, barcode)
+    search_url = f"{base}/search?search={barcode}"
+    r["url_producto"] = search_url
+
+    html = fetch(search_url)
+    if not html:
+        r["error"] = "No se pudo conectar"
+        return r
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Buscar link al producto (/product/ en la URL)
+    prod_link = None
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if "/product/" in href:
+            prod_link = urljoin(base, href)
+            break
+
+    if not prod_link:
+        r["error"] = "Producto no encontrado en búsqueda"
+        return r
+
+    r["url_producto"] = prod_link
+    time.sleep(1)
+    html2 = fetch(prod_link, referer=search_url)
+    if not html2:
+        r["error"] = "No se pudo acceder al producto"
+        return r
+
+    soup2 = BeautifulSoup(html2, "html.parser")
+
+    # 1. JSON-LD (más confiable, Superseis lo incluye)
+    nombre_ld, precio_ld = extraer_jsonld(soup2)
+    if nombre_ld: r["nombre"] = nombre_ld
+    if precio_ld:
+        r["precio"] = precio_ld
+        r["disponible"] = True
+        r["url_producto"] = prod_link
+        return r
+
+    # 2. Fallback: buscar precio ₲ en texto
+    h1 = soup2.select_one("h1")
+    if h1: r["nombre"] = h1.get_text(strip=True)
+
+    texto = soup2.get_text(" ")
+    r["precio"] = precio_de_texto(texto)
+
+    r["disponible"] = r["precio"] is not None
+    if not r["disponible"]: r["error"] = "Precio no encontrado"
+    return r
+
+
+# ══════════════════════════════════════════════
+# BIGGIE
 # ══════════════════════════════════════════════
 def scrape_biggie(barcode):
     base = "https://biggie.com.py"
@@ -115,314 +246,234 @@ def scrape_biggie(barcode):
     search_url = f"{base}/search?q={barcode}"
     r["url_producto"] = search_url
 
-    soup = fetch(search_url)
-    if not soup:
+    html = fetch(search_url)
+    if not html:
         r["error"] = "No se pudo conectar"
         return r
 
-    # Buscar precio directo en resultados (card del producto)
-    # El precio aparece como "₲ 12.000" en la tarjeta
-    texto_pagina = soup.get_text()
-    precio = extraer_precio_texto(texto_pagina)
-    if precio:
-        r["precio"] = precio
-        # Buscar nombre del producto
-        nombre_el = soup.select_one(".product-name, .product-title, h3, h2")
-        if nombre_el:
-            r["nombre"] = nombre_el.get_text(strip=True)
-        r["disponible"] = True
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Buscar link de producto
+    prod_link = None
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if any(x in href for x in ["/product/", "/item/", "/p/", "/productos/"]):
+            prod_link = urljoin(base, href)
+            break
+
+    # Si no encontró link específico, buscar precio directamente en resultados
+    if not prod_link:
+        texto = soup.get_text(" ")
+        p = precio_de_texto(texto)
+        if p:
+            r["precio"] = p
+            # Buscar nombre
+            for tag in ["h2", "h3", "h4"]:
+                for el in soup.find_all(tag):
+                    txt = el.get_text(strip=True)
+                    if len(txt) > 5 and "₲" not in txt:
+                        r["nombre"] = txt
+                        break
+                if r["nombre"]: break
+            r["disponible"] = True
+            return r
+        r["error"] = "Producto no encontrado"
         return r
 
-    # Intentar entrar al producto
-    link = (soup.select_one("a[href*='/item/']") or
-            soup.select_one("a[href*='/product/']") or
-            soup.select_one("a[href*='/products/']") or
-            soup.select_one(".product-card a") or
-            soup.select_one("article a"))
+    r["url_producto"] = prod_link
+    time.sleep(1)
+    html2 = fetch(prod_link, referer=search_url)
+    if not html2:
+        r["error"] = "No se pudo acceder al producto"
+        return r
 
-    if link:
-        prod_url = urljoin(base, link.get("href", ""))
-        r["url_producto"] = prod_url
-        time.sleep(1)
-        soup2 = fetch(prod_url, referer=search_url)
-        if soup2:
-            h1 = soup2.select_one("h1")
-            if h1: r["nombre"] = h1.get_text(strip=True)
-            precio = extraer_precio_texto(soup2.get_text())
-            if precio:
-                r["precio"] = precio
-                r["disponible"] = True
-                return r
+    soup2 = BeautifulSoup(html2, "html.parser")
 
-    if not r["disponible"]:
-        r["error"] = "Producto no encontrado"
+    # JSON-LD
+    nombre_ld, precio_ld = extraer_jsonld(soup2)
+    if nombre_ld: r["nombre"] = nombre_ld
+    if precio_ld: r["precio"] = precio_ld
+
+    if not r["precio"]:
+        h1 = soup2.select_one("h1")
+        if h1: r["nombre"] = h1.get_text(strip=True)
+        r["precio"] = precio_de_texto(soup2.get_text(" "))
+
+    r["disponible"] = r["precio"] is not None
+    if not r["disponible"]: r["error"] = "Precio no encontrado"
     return r
 
 
 # ══════════════════════════════════════════════
-# STOCK — ASP.NET propio (NO es VTEX)
-# Hay que encontrar la URL correcta de búsqueda
+# STOCK
 # ══════════════════════════════════════════════
 def scrape_stock(barcode):
     base = "https://www.stock.com.py"
     r = build_result("Stock", base, barcode)
 
-    # Probar diferentes URLs de búsqueda de Stock
-    urls_busqueda = [
-        f"{base}/search?search={barcode}",
+    urls = [
         f"{base}/search?q={barcode}",
         f"{base}/buscar?q={barcode}",
         f"{base}/productos?search={barcode}",
+        f"{base}/Search?buscar={barcode}",
     ]
 
-    for search_url in urls_busqueda:
-        r["url_producto"] = search_url
-        soup = fetch(search_url)
-        if not soup:
+    for url in urls:
+        html = fetch(url)
+        if not html or len(html) < 2000:
+            time.sleep(0.3)
             continue
-
-        texto = soup.get_text()
-        # Verificar que hay resultados (no página de error)
-        if "no se encontr" in texto.lower() or "sin resultados" in texto.lower():
-            continue
-
-        precio = extraer_precio_texto(texto)
-        if precio:
-            r["precio"] = precio
-            nombre_el = soup.select_one("h1, h2, h3, .product-name, .product-title")
-            if nombre_el:
-                r["nombre"] = nombre_el.get_text(strip=True)
-            r["disponible"] = True
-            return r
+        r["url_producto"] = url
+        soup = BeautifulSoup(html, "html.parser")
 
         # Buscar link de producto
-        link = (soup.select_one("a[href*='/producto/']") or
-                soup.select_one("a[href*='/product/']") or
-                soup.select_one("a[href*='/item/']") or
-                soup.select_one(".product-card a") or
-                soup.select_one("article a") or
-                soup.select_one("h2 a, h3 a"))
-        if link:
-            prod_url = urljoin(base, link.get("href", ""))
-            r["url_producto"] = prod_url
+        prod_link = None
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if any(x in href for x in ["/product/", "/item/", "/p/", "/detalle"]):
+                prod_link = urljoin(base, href)
+                break
+
+        if prod_link:
+            r["url_producto"] = prod_link
             time.sleep(1)
-            soup2 = fetch(prod_url, referer=search_url)
-            if soup2:
-                h1 = soup2.select_one("h1")
-                if h1: r["nombre"] = h1.get_text(strip=True)
-                precio = extraer_precio_texto(soup2.get_text())
-                if precio:
-                    r["precio"] = precio
+            html2 = fetch(prod_link, referer=url)
+            if html2:
+                soup2 = BeautifulSoup(html2, "html.parser")
+                nombre_ld, precio_ld = extraer_jsonld(soup2)
+                if nombre_ld: r["nombre"] = nombre_ld
+                if precio_ld: r["precio"] = precio_ld
+                if not r["precio"]:
+                    h1 = soup2.select_one("h1")
+                    if h1: r["nombre"] = h1.get_text(strip=True)
+                    r["precio"] = precio_de_texto(soup2.get_text(" "))
+                if r["precio"]:
                     r["disponible"] = True
                     return r
 
-    if not r["disponible"]:
-        r["error"] = "Producto no encontrado"
+        # Sin link de producto, buscar precio directo
+        p = precio_de_texto(soup.get_text(" "))
+        if p:
+            r["precio"] = p
+            r["disponible"] = True
+            return r
+
+        time.sleep(0.5)
+
+    r["error"] = "Producto no encontrado"
     return r
 
 
 # ══════════════════════════════════════════════
-# SUPERSEIS — URL correcta: /search?search=
-# Precio visible: ₲ 12.000
-# ══════════════════════════════════════════════
-def scrape_superseis(barcode):
-    base = "https://www.superseis.com.py"
-    r = build_result("Superseis", base, barcode)
-
-    # URL CORRECTA según captura: /search?search=
-    search_url = f"{base}/search?search={barcode}"
-    r["url_producto"] = search_url
-
-    soup = fetch(search_url)
-    if not soup:
-        r["error"] = "No se pudo conectar"
-        return r
-
-    # Precio directo en la tarjeta de resultados
-    texto = soup.get_text()
-    precio = extraer_precio_texto(texto)
-    if precio:
-        r["precio"] = precio
-        nombre_el = (soup.select_one(".product-name") or
-                     soup.select_one("h3") or
-                     soup.select_one(".item-name"))
-        if nombre_el:
-            r["nombre"] = nombre_el.get_text(strip=True)
-        r["disponible"] = True
-        return r
-
-    # Entrar al producto
-    link = (soup.select_one("a[href*='/product/']") or
-            soup.select_one("a[href*='/item/']") or
-            soup.select_one(".product-card a") or
-            soup.select_one("article a") or
-            soup.select_one("h3 a, h2 a"))
-
-    if link:
-        prod_url = urljoin(base, link.get("href", ""))
-        r["url_producto"] = prod_url
-        time.sleep(1)
-        soup2 = fetch(prod_url, referer=search_url)
-        if soup2:
-            h1 = soup2.select_one("h1")
-            if h1: r["nombre"] = h1.get_text(strip=True)
-            precio = extraer_precio_texto(soup2.get_text())
-            if precio:
-                r["precio"] = precio
-                r["disponible"] = True
-                return r
-
-    if not r["disponible"]:
-        r["error"] = "Producto no encontrado"
-    return r
-
-
-# ══════════════════════════════════════════════
-# SALEMMA — Shopify
-# ══════════════════════════════════════════════
-def scrape_salemma(barcode):
-    base = "https://www.salemmaonline.com.py"
-    r = build_result("Salemma", base, barcode)
-    search_url = f"{base}/search?q={barcode}&type=product"
-    r["url_producto"] = search_url
-
-    soup = fetch(search_url)
-    if not soup:
-        r["error"] = "No se pudo conectar"
-        return r
-
-    texto = soup.get_text()
-    precio = extraer_precio_texto(texto)
-    if precio:
-        r["precio"] = precio
-        nombre_el = soup.select_one("h1, h2, h3, .product-name")
-        if nombre_el: r["nombre"] = nombre_el.get_text(strip=True)
-        r["disponible"] = True
-        return r
-
-    link = (soup.select_one("a[href*='/products/']") or
-            soup.select_one("a[href*='/product/']"))
-    if link:
-        prod_url = urljoin(base, link.get("href", "").split("?")[0])
-        r["url_producto"] = prod_url
-        time.sleep(1)
-        soup2 = fetch(prod_url, referer=search_url)
-        if soup2:
-            h1 = soup2.select_one("h1")
-            if h1: r["nombre"] = h1.get_text(strip=True)
-            precio = extraer_precio_texto(soup2.get_text())
-            if precio:
-                r["precio"] = precio
-                r["disponible"] = True
-                return r
-
-    if not r["disponible"]:
-        r["error"] = "Producto no encontrado"
-    return r
-
-
-# ══════════════════════════════════════════════
-# REAL — probar URLs correctas
+# REAL
 # ══════════════════════════════════════════════
 def scrape_real(barcode):
     base = "https://www.realonline.com.py"
     r = build_result("Real", base, barcode)
+    search_url = f"{base}/search?q={barcode}"
+    r["url_producto"] = search_url
 
-    urls_busqueda = [
-        f"{base}/search?search={barcode}",
-        f"{base}/search?q={barcode}",
-        f"{base}/buscar?q={barcode}",
-    ]
+    html = fetch(search_url)
+    if not html:
+        r["error"] = "No se pudo conectar"
+        return r
 
-    for search_url in urls_busqueda:
-        r["url_producto"] = search_url
-        soup = fetch(search_url)
-        if not soup: continue
+    soup = BeautifulSoup(html, "html.parser")
 
-        texto = soup.get_text()
-        if "no se encontr" in texto.lower(): continue
+    prod_link = None
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if any(x in href for x in ["/product/", "/item/", "/p/", "/detalle"]):
+            prod_link = urljoin(base, href)
+            break
 
-        precio = extraer_precio_texto(texto)
-        if precio:
-            r["precio"] = precio
-            nombre_el = soup.select_one("h1, h2, h3, .product-name")
-            if nombre_el: r["nombre"] = nombre_el.get_text(strip=True)
-            r["disponible"] = True
-            return r
-
-        link = (soup.select_one("a[href*='/producto/']") or
-                soup.select_one("a[href*='/product/']") or
-                soup.select_one("a[href*='/item/']") or
-                soup.select_one("article a") or
-                soup.select_one("h2 a, h3 a"))
-        if link:
-            prod_url = urljoin(base, link.get("href", ""))
-            r["url_producto"] = prod_url
-            time.sleep(1)
-            soup2 = fetch(prod_url, referer=search_url)
-            if soup2:
+    if prod_link:
+        r["url_producto"] = prod_link
+        time.sleep(1)
+        html2 = fetch(prod_link, referer=search_url)
+        if html2:
+            soup2 = BeautifulSoup(html2, "html.parser")
+            nombre_ld, precio_ld = extraer_jsonld(soup2)
+            if nombre_ld: r["nombre"] = nombre_ld
+            if precio_ld: r["precio"] = precio_ld
+            if not r["precio"]:
                 h1 = soup2.select_one("h1")
                 if h1: r["nombre"] = h1.get_text(strip=True)
-                precio = extraer_precio_texto(soup2.get_text())
-                if precio:
-                    r["precio"] = precio
-                    r["disponible"] = True
-                    return r
+                r["precio"] = precio_de_texto(soup2.get_text(" "))
+    else:
+        p = precio_de_texto(soup.get_text(" "))
+        if p: r["precio"] = p
 
-    if not r["disponible"]:
-        r["error"] = "Producto no encontrado"
+    r["disponible"] = r["precio"] is not None
+    if not r["disponible"]: r["error"] = "Producto no encontrado"
     return r
 
 
 # ══════════════════════════════════════════════
 # GENÉRICO
 # ══════════════════════════════════════════════
-def scrape_generico(barcode, nombre, url_base):
-    r = build_result(nombre, url_base, barcode)
+def scrape_generico(barcode, nombre_super, url_base):
+    r = build_result(nombre_super, url_base, barcode)
     patterns = [
-        f"{url_base.rstrip('/')}/search?search={barcode}",
         f"{url_base.rstrip('/')}/search?q={barcode}",
+        f"{url_base.rstrip('/')}/search?search={barcode}",
         f"{url_base.rstrip('/')}/buscar?q={barcode}",
-        f"{url_base.rstrip('/')}/search?q={barcode}&type=product",
+        f"{url_base.rstrip('/')}/catalogsearch/result/?q={barcode}",
     ]
     for url in patterns:
-        soup = fetch(url)
-        if not soup: continue
+        html = fetch(url)
+        if not html or len(html) < 2000:
+            time.sleep(0.3)
+            continue
         r["url_producto"] = url
-        texto = soup.get_text()
-        precio = extraer_precio_texto(texto)
-        if precio:
-            r["precio"] = precio
-            nombre_el = soup.select_one("h1, h2, h3, .product-name")
-            if nombre_el: r["nombre"] = nombre_el.get_text(strip=True)
+        soup = BeautifulSoup(html, "html.parser")
+
+        # JSON-LD directo
+        nombre_ld, precio_ld = extraer_jsonld(soup)
+        if precio_ld:
+            r["nombre"] = nombre_ld
+            r["precio"] = precio_ld
             r["disponible"] = True
             return r
-        link = (soup.select_one("a[href*='/product']") or
-                soup.select_one("a[href*='/item']") or
-                soup.select_one("article a") or soup.select_one("h2 a"))
-        if link:
-            prod_url = urljoin(url_base, link.get("href", ""))
-            r["url_producto"] = prod_url
-            time.sleep(1)
-            soup2 = fetch(prod_url, referer=url)
-            if soup2:
-                h1 = soup2.select_one("h1")
-                if h1: r["nombre"] = h1.get_text(strip=True)
-                precio = extraer_precio_texto(soup2.get_text())
-                if precio:
-                    r["precio"] = precio
-                    r["disponible"] = True
-                    return r
-    if not r["disponible"]:
-        r["error"] = "Producto no encontrado"
+
+        # Buscar link de producto
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if any(x in href for x in ["/product/", "/item/", "/p/", "/producto/", "/detalle"]):
+                prod_url = urljoin(url_base, href)
+                r["url_producto"] = prod_url
+                time.sleep(1)
+                html2 = fetch(prod_url, referer=url)
+                if html2:
+                    soup2 = BeautifulSoup(html2, "html.parser")
+                    nombre_ld2, precio_ld2 = extraer_jsonld(soup2)
+                    if nombre_ld2: r["nombre"] = nombre_ld2
+                    if precio_ld2: r["precio"] = precio_ld2
+                    if not r["precio"]:
+                        h1 = soup2.select_one("h1")
+                        if h1: r["nombre"] = h1.get_text(strip=True)
+                        r["precio"] = precio_de_texto(soup2.get_text(" "))
+                    if r["precio"]:
+                        r["disponible"] = True
+                        return r
+                break
+
+        p = precio_de_texto(soup.get_text(" "))
+        if p:
+            r["precio"] = p
+            r["disponible"] = True
+            return r
+        time.sleep(0.5)
+
+    r["error"] = "Producto no encontrado"
     return r
 
 
 SCRAPERS_MAP = {
     "biggie.com.py": lambda b: scrape_biggie(b),
-    "biggie.com":    lambda b: scrape_biggie(b),
+    "biggie.com": lambda b: scrape_biggie(b),
     "salemmaonline.com.py": lambda b: scrape_salemma(b),
-    "stock.com.py":  lambda b: scrape_stock(b),
+    "stock.com.py": lambda b: scrape_stock(b),
     "realonline.com.py": lambda b: scrape_real(b),
     "superseis.com.py": lambda b: scrape_superseis(b),
 }
@@ -445,11 +496,11 @@ def calcular_resumen(barcode, resultados):
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"api": "SuperComparador Paraguay", "version": "5.0", "estado": "online"})
+    return jsonify({"api": "SuperComparador Paraguay", "version": "7.0", "estado": "online"})
 
 @app.route("/ping", methods=["GET"])
 def ping():
-    return jsonify({"status": "ok", "version": "5.0"})
+    return jsonify({"status": "ok", "version": "7.0"})
 
 @app.route("/buscar", methods=["GET"])
 def buscar():
@@ -473,12 +524,12 @@ def buscar_custom():
     if not supermercados: return jsonify({"error": "supermercados requerido"}), 400
     resultados = []
     for item in supermercados:
-        nombre = item.get("nombre", "Supermercado")
+        nombre_super = item.get("nombre", "Supermercado")
         url = item.get("url", "")
         if not url: continue
         fn = get_scraper(url)
-        res = fn(barcode) if fn else scrape_generico(barcode, nombre, url)
-        res["supermercado"] = nombre
+        res = fn(barcode) if fn else scrape_generico(barcode, nombre_super, url)
+        res["supermercado"] = nombre_super
         resultados.append(res)
     return jsonify(calcular_resumen(barcode, resultados))
 
