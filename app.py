@@ -128,50 +128,57 @@ def scrape_salemma(barcode):
 
     soup = BeautifulSoup(html, "html.parser")
 
-    # Salemma muestra resultados de búsqueda — buscar link al producto
-    # El producto tiene el barcode en la URL o en el texto
-    prod_link = None
-
-    # Buscar links de producto (contienen /producto/ en la URL)
+    # Recolectar TODOS los links de producto /producto/
+    prod_links = []
     for a in soup.find_all("a", href=True):
         href = a["href"]
         if "/producto/" in href:
-            prod_link = urljoin(base, href)
-            break
+            prod_links.append(urljoin(base, href))
 
-    if not prod_link:
+    if not prod_links:
         r["error"] = "Producto no encontrado"
         return r
 
-    r["url_producto"] = prod_link
-    time.sleep(1)
-    html2 = fetch(prod_link, referer=search_url)
-    if not html2:
-        r["error"] = "No se pudo acceder al producto"
+    # Verificar cada producto hasta encontrar el que tiene el barcode correcto
+    # Salemma muestra "Codigo: BARCODE" en la página del producto
+    for prod_link in prod_links[:4]:  # máximo 4 intentos
+        time.sleep(0.8)
+        html2 = fetch(prod_link, referer=search_url)
+        if not html2:
+            continue
+
+        # Verificar que la página contiene el barcode buscado
+        if barcode not in html2:
+            logger.info(f"Salemma: {prod_link} no contiene el barcode {barcode}, saltando")
+            continue
+
+        # Este es el producto correcto
+        soup2 = BeautifulSoup(html2, "html.parser")
+        r["url_producto"] = prod_link
+
+        # Nombre
+        h1 = soup2.select_one("h1")
+        if h1:
+            r["nombre"] = h1.get_text(strip=True)
+        else:
+            r["nombre"] = extraer_og(soup2)
+
+        # Precio: "Gs. 12.000 por unidad"
+        r["precio"] = precio_de_texto(html2)
+
+        # Imagen
+        img = soup2.select_one("img[src*='.webp'], img[src*='.jpg'], img[src*='.png']")
+        if img:
+            src = img.get("src", "")
+            if src and "logo" not in src.lower():
+                r["imagen"] = urljoin(base, src)
+
+        r["disponible"] = r["precio"] is not None
+        if not r["disponible"]:
+            r["error"] = "Precio no encontrado"
         return r
 
-    soup2 = BeautifulSoup(html2, "html.parser")
-
-    # Nombre: h1 o título OG
-    h1 = soup2.select_one("h1")
-    if h1:
-        r["nombre"] = h1.get_text(strip=True)
-    else:
-        r["nombre"] = extraer_og(soup2)
-
-    # Precio: buscar "Gs. 12.000" en el texto de la página
-    # Salemma usa: "Gs. 12.000 por unidad"
-    texto_precio = soup2.get_text(" ")
-    r["precio"] = precio_de_texto(texto_precio)
-
-    # Imagen
-    img = soup2.select_one("img[src*='producto'], img[src*='product'], .product-image img")
-    if img:
-        src = img.get("src", "")
-        r["imagen"] = urljoin(base, src) if src else None
-
-    r["disponible"] = r["precio"] is not None
-    if not r["disponible"]: r["error"] = "Precio no encontrado"
+    r["error"] = "Producto no encontrado (barcode no coincide)"
     return r
 
 
