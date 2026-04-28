@@ -1,7 +1,7 @@
 services:
   - type: web
-    name: supercomparador-py
+    name: supercomparador
     env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120
     plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 8 --timeout 120
