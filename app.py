@@ -13,39 +13,43 @@ CORS(app)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# SERVIR FRONTEND
 @app.route("/")
 def home():
     return send_file("app.html")
 
 @app.route("/ping")
 def ping():
-    return jsonify({"status":"ok","version":"9.0"})
-
-# ---------- HELPERS ----------
+    return jsonify({"status": "ok", "version": "9.0"})
 
 HEADERS = {
-    "User-Agent":"Mozilla/5.0"
+    "User-Agent": "Mozilla/5.0"
 }
+
+def fetch(url):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=12)
+        if r.status_code == 200:
+            return r.text
+    except:
+        return None
+    return None
 
 def limpiar_precio(txt):
     if not txt:
         return None
-
     txt = re.sub(r"[^\d]", "", txt)
-
     try:
-        val = float(txt)
-        return val if val > 100 else None
+        n = float(txt)
+        return n if n > 100 else None
     except:
         return None
 
-def resultado_base(nombre, url, barcode):
+def base(nombre, url, barcode):
     return {
         "supermercado": nombre,
         "url_supermercado": url,
         "barcode": barcode,
-        "nombre": None,
+        "nombre": barcode,
         "precio": None,
         "url_producto": url,
         "imagen": None,
@@ -53,74 +57,61 @@ def resultado_base(nombre, url, barcode):
         "error": "No encontrado"
     }
 
-def fetch(url):
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        if r.status_code == 200:
-            return r.text
-    except:
-        pass
+def buscar_precio_texto(html):
+    txt = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+
+    patrones = [
+        r'Gs\.?\s*([\d\.]+)',
+        r'₲\s*([\d\.]+)',
+    ]
+
+    for p in patrones:
+        m = re.search(p, txt, re.I)
+        if m:
+            return limpiar_precio(m.group(1))
     return None
 
-# ---------- SCRAPERS ----------
-
 def scrape_superseis(barcode):
-    base = "https://www.superseis.com.py"
-    r = resultado_base("Superseis", base, barcode)
+    url = f"https://www.superseis.com.py/search?search={barcode}"
+    r = base("Superseis", "https://www.superseis.com.py", barcode)
+    r["url_producto"] = url
 
-    url = f"{base}/search?search={barcode}"
     html = fetch(url)
-
     if not html:
         r["error"] = "Sin conexión"
         return r
 
-    soup = BeautifulSoup(html, "html.parser")
-
-    txt = soup.get_text(" ", strip=True)
-
-    precio = re.search(r'Gs\.?\s*([\d\.]+)', txt)
-
+    precio = buscar_precio_texto(html)
     if precio:
-        r["precio"] = limpiar_precio(precio.group(1))
-        r["nombre"] = barcode
+        r["precio"] = precio
         r["disponible"] = True
         r["error"] = None
 
-    r["url_producto"] = url
     return r
 
 def scrape_salemma(barcode):
-    base = "https://www.salemmaonline.com.py"
-    r = resultado_base("Salemma", base, barcode)
+    url = f"https://www.salemmaonline.com.py/search?q={barcode}"
+    r = base("Salemma", "https://www.salemmaonline.com.py", barcode)
+    r["url_producto"] = url
 
-    url = f"{base}/search?q={barcode}"
     html = fetch(url)
-
     if not html:
         r["error"] = "Sin conexión"
         return r
 
-    txt = BeautifulSoup(html,"html.parser").get_text(" ", strip=True)
-
-    precio = re.search(r'Gs\.?\s*([\d\.]+)', txt)
-
+    precio = buscar_precio_texto(html)
     if precio:
-        r["precio"] = limpiar_precio(precio.group(1))
-        r["nombre"] = barcode
+        r["precio"] = precio
         r["disponible"] = True
         r["error"] = None
 
-    r["url_producto"] = url
     return r
 
-def scrape_fake(nombre,url,barcode):
-    r = resultado_base(nombre,url,barcode)
+def manual(nombre, sitio, barcode):
+    r = base(nombre, sitio, barcode)
+    r["url_producto"] = f"{sitio}/search?q={barcode}"
     r["error"] = "Consultar manualmente"
-    r["url_producto"] = f"{url}/search?q={barcode}"
     return r
-
-# ---------- RESUMEN ----------
 
 def resumen(barcode, resultados):
     precios = [x["precio"] for x in resultados if x["precio"]]
@@ -131,32 +122,29 @@ def resumen(barcode, resultados):
         "encontrado_en": len(precios),
         "precio_minimo": min(precios) if precios else None,
         "precio_maximo": max(precios) if precios else None,
-        "ahorro_maximo": max(precios)-min(precios) if len(precios)>=2 else 0,
+        "ahorro_maximo": (max(precios)-min(precios)) if len(precios) >= 2 else 0,
         "resultados": resultados
     }
 
-# ---------- API ----------
-
 @app.route("/buscar")
 def buscar():
-
-    barcode = request.args.get("barcode","").strip()
+    barcode = request.args.get("barcode", "").strip()
 
     if not barcode:
-        return jsonify({"error":"barcode requerido"}),400
+        return jsonify({"error": "barcode requerido"}), 400
 
-    funciones = [
+    tareas = [
         lambda: scrape_superseis(barcode),
         lambda: scrape_salemma(barcode),
-        lambda: scrape_fake("Biggie","https://biggie.com.py",barcode),
-        lambda: scrape_fake("Stock","https://www.stock.com.py",barcode),
-        lambda: scrape_fake("Real","https://www.realonline.com.py",barcode),
+        lambda: manual("Biggie", "https://biggie.com.py", barcode),
+        lambda: manual("Stock", "https://www.stock.com.py", barcode),
+        lambda: manual("Real", "https://www.realonline.com.py", barcode),
     ]
 
     resultados = []
 
     with ThreadPoolExecutor(max_workers=5) as ex:
-        futures = [ex.submit(fn) for fn in funciones]
+        futures = [ex.submit(t) for t in tareas]
 
         for f in as_completed(futures):
             try:
@@ -164,15 +152,15 @@ def buscar():
             except Exception as e:
                 logger.error(str(e))
 
-    return jsonify(resumen(barcode,resultados))
+    return jsonify(resumen(barcode, resultados))
 
 @app.route("/buscar-custom", methods=["POST"])
 def buscar_custom():
     data = request.get_json()
-    barcode = data.get("barcode","").strip()
-
+    barcode = data.get("barcode", "").strip()
+    request.args = {"barcode": barcode}
     return buscar()
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT",5000))
-    app.run(host="0.0.0.0",port=port)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
